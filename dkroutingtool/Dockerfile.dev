@@ -1,105 +1,124 @@
 FROM debian:stretch
 
+ARG osm_download_url
+ARG osm_filename_arg
+ENV osm_filename $osm_filename_arg
+
 RUN sed -i s/deb.debian.org/archive.debian.org/g /etc/apt/sources.list
 RUN sed -i 's|security.debian.org|archive.debian.org/|g' /etc/apt/sources.list
 RUN sed -i '/stretch-updates/d' /etc/apt/sources.list
 
-RUN apt-get update
+RUN apt-get update && \ 
+	apt-get -y install \
+	cmake \
+	curl \
+	g++ \
+	git \
+	gnupg2 \
+	libboost-dev \
+	libboost-filesystem-dev \
+	libboost-iostreams-dev \
+	libboost-program-options-dev \
+	libboost-regex-dev \
+	libboost-system-dev \
+	libboost-test-dev \
+	libboost-thread-dev \
+	libbz2-dev \
+	libexpat1-dev \
+	libgdal-dev \
+	libgomp1 \
+	liblua5.2-dev \
+	libluabind-dev \
+	libsparsehash-dev \
+	libstxxl-dev \
+	libtbb-dev \
+	libxml2-dev \
+	libzip-dev \
+	lua5.2 \
+	pkg-config \
+	wget \
+	vim \
+	zlib1g-dev
 
-RUN apt-get -y install git g++ cmake libboost-dev libboost-filesystem-dev libboost-thread-dev libboost-system-dev libboost-regex-dev libstxxl-dev libxml2-dev libsparsehash-dev libbz2-dev zlib1g-dev libzip-dev libgomp1 lua5.2 liblua5.2-dev libluabind-dev pkg-config libgdal-dev libboost-program-options-dev libboost-iostreams-dev libboost-test-dev libtbb-dev libexpat1-dev wget
-
+# Build osrm-backend
 RUN git clone -b 5.21 --single-branch https://github.com/Project-OSRM/osrm-backend.git
 
 COPY /c_binding_resources/table_parameters.hpp osrm-backend/include/engine/api/table_parameters.hpp
 
-RUN cd osrm-backend && mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && cmake --build . && cmake --build . --target install
+RUN cd osrm-backend && \
+	mkdir -p build && \
+	cd build && \
+	cmake .. -DCMAKE_BUILD_TYPE=Release && \
+	cmake --build . && \
+	cmake --build . --target install
 
-ARG osm_download_url
-
-ARG osm_filename_arg
-
-ENV osm_filename $osm_filename_arg
-
-RUN wget -O "$osm_filename_arg.osm.pbf" --no-check-certificate $osm_download_url
-
+# Install Python & Python Packages
 RUN wget https://repo.anaconda.com/miniconda/Miniconda3-py37_4.8.3-Linux-x86_64.sh
 
 RUN bash Miniconda3-py37_4.8.3-Linux-x86_64.sh -b -p /opt/conda
 
 ENV PATH="${PATH}:/opt/conda/bin"
 
-RUN mkdir osrm-backend/defaultprofiles
+COPY requirements.txt . 
 
-RUN mv osrm-backend/profiles/*.lua osrm-backend/defaultprofiles/
+RUN /opt/conda/bin/python -m pip install -r requirements.txt
 
+COPY src src
+
+# Create directory structure for runs
+RUN mkdir -p data/gps_data_clean && \
+	mkdir data/time_and_dist_matrices && \
+	mkdir maps && \
+	mkdir -p manual_edits/maps
+
+COPY manual.sh .
+
+# Prep for script runs:
+RUN mkdir -p osrm-backend/defaultprofiles
+COPY build_vehicle_profiles.py .
+
+RUN cp -r osrm-backend/include osrm-backend/example
+COPY /c_binding_resources/CMakeLists.txt .
+COPY /c_binding_resources/python_bindings.cpp example.cpp
+RUN cd osrm-backend/example && \
+	mv ../../CMakeLists.txt . && \
+	mv ../../example.cpp .
+RUN git clone -b v2.3 https://github.com/pybind/pybind11.git
+RUN cp -r pybind11 osrm-backend/example/
+
+
+# Updatable Configs & Maps Script
+
+# 1) Build Vehicle Profiles
+
+# Drop vehicle profiles in osrm-backend/profiles, then:
+# RUN mv osrm-backend/profiles/*.lua osrm-backend/defaultprofiles/
 COPY /veh_profiles/* osrm-backend/profiles/
 
 COPY build_parameters.yml .
 
-COPY build_vehicle_profiles.py .
-
 RUN /opt/conda/bin/python build_vehicle_profiles.py
 
-COPY requirements.txt .
+# 2) Obtain Maps and build OSRM Backend 
+RUN wget -O "$osm_filename_arg.osm.pbf" --no-check-certificate $osm_download_url
 
-RUN /opt/conda/bin/python -m pip install -r requirements.txt
+RUN cd osrm-backend/example && \
+	mkdir build && \
+	cd build && \
+	cmake .. && \
+	make
 
-#RUN conda install cffi==1.12.2
+RUN mkdir py-lib && \
+	mv osrm-backend/example/build/osrmbindings.cpython-37m-x86_64-linux-gnu.so py-lib/
 
-RUN apt-get -y install vim
-
-RUN git clone -b v2.3 https://github.com/pybind/pybind11.git
-
-RUN cp -r osrm-backend/include osrm-backend/example
-
-COPY /c_binding_resources/CMakeLists.txt .
-
-COPY /c_binding_resources/python_bindings.cpp example.cpp
-
-RUN cd osrm-backend/example && mv ../../CMakeLists.txt . && mv ../../example.cpp .
-
-RUN cp -r pybind11 osrm-backend/example/
-
-RUN cd osrm-backend/example && mkdir build && cd build && cmake .. && make
-
-RUN apt-get update
-
-RUN apt-get -y install curl gnupg2
-
-RUN mkdir data
-
-RUN mkdir data/gps_data_clean
-
-RUN mkdir data/time_and_dist_matrices
-
-COPY ["/local_data/customer_data.xlsx", "data/."]
-
+# Update user config
+COPY /local_data/customer_data.xlsx data/.
 COPY /local_data/extra_points.csv data/.
-
 COPY /local_data/config.json data/.
-
 COPY /local_data/custom_header.yaml data/.
 
-RUN mkdir maps
-
-RUN mkdir manual_edits
-
-RUN mkdir manual_edits/maps
-
-COPY manual.ipynb .
-
-COPY manual.sh .
-
-COPY Makefile .
-
-RUN mkdir -p py-lib
-
-RUN mv osrm-backend/example/build/osrmbindings.cpython-37m-x86_64-linux-gnu.so py-lib/
-
-#RUN pip uninstall -y typing-extensions && pip uninstall -y typing-extensions && pip install typing-extensions==4.7.1
-RUN pip uninstall -y typing-extensions && pip install typing-extensions==4.7.1
-
-COPY src src
+# COPY Makefile .
+# RUN pip uninstall -y typing-extensions && pip install typing-extensions==4.7.1
 
 ENV PYTHONPATH "${PYTHONPATH}:./py-lib:/src/python"
 
